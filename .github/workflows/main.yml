@@ -83,7 +83,7 @@ jobs:
           export BILLY_SERVER=https://billy.codesec.aquasec.com
           export BILLY_VERSION=1.390
 
-          curl -sLo install.sh download.codesec.aquasec.com/billy/install.sh
+          curl -sLo install.sh https://download.codesec.aquasec.com/billy/install.sh
           curl -sLo install.sh.checksum https://github.com/argonsecurity/releases/releases/latest/download/install.sh.checksum
 
           # Verify checksum (will exit non-zero on mismatch)
@@ -131,4 +131,15 @@ jobs:
             --cspm-url https://api.cloudsploit.com \
             --artifact-path "knightfortheright/webflux-repro:v1" \
             --quiet \
-            --log-file bi
+            --log-file billy-image.log \
+            --sbom-path SBOM_IMAGE
+
+      - name: Upload SBOMs and logs
+        uses: actions/upload-artifact@v4
+        with:
+          name: billy-jar-vs-image-output
+          path: |
+            SBOM_JAR
+            SBOM_IMAGE
+            billy-jar.log
+            billy-image.log
