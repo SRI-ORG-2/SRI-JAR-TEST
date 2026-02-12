@@ -28,9 +28,7 @@ jobs:
           # Running the aqua-scanner container and asking trivy to scan the repo (filesystem)
           docker run --rm -v "${{ github.workspace }}":/src -w /src aquasec/aqua-scanner \
             trivy fs --format json \
-              --db-repository=registry.aquasec.com/trivy-db:2 \
               --checks-bundle-repository=registry.aquasec.com/trivy-checks:1 \
-              --java-db-repository=registry.aquasec.com/trivy-java-db:1 \
               --output /src/trivy_scan_repo/trivy-repo.json \
               --scanners config,vuln,secret .
           echo "Aqua (Trivy fs) saved to trivy_scan_repo/trivy-repo.json"
