@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v2
+        uses: actions/checkout@v3
 
       - name: Run Aqua scanner (via docker run)
         run: |
@@ -83,13 +83,9 @@ jobs:
         run: |
           export BILLY_SERVER="https://billy.codesec.aquasec.com"
           export BILLY_VERSION="1.390"
-
           curl -sLo install.sh "https://download.codesec.aquasec.com/billy/install.sh"
           curl -sLo install.sh.checksum "https://github.com/argonsecurity/releases/releases/latest/download/install.sh.checksum"
-
-          # Verify checksum (will exit non-zero on mismatch)
           sha256sum -c install.sh.checksum
-
           BINDIR="." sh install.sh
           ./billy --version
 
@@ -102,7 +98,6 @@ jobs:
           export TRIVY_JAVA_DB_REPOSITORY="registry.aquasec.com/trivy-java-db:1"
           export TRIVY_CHECKS_BUNDLE_REPOSITORY="registry.aquasec.com/trivy-checks:1"
           export TRIVY_QUIET=true
-
           mkdir -p SBOM_JAR
           ./billy generate \
             --access-token "${{ secrets.GITHUB_TOKEN }}" \
@@ -123,7 +118,6 @@ jobs:
           export TRIVY_JAVA_DB_REPOSITORY="registry.aquasec.com/trivy-java-db:1"
           export TRIVY_CHECKS_BUNDLE_REPOSITORY="registry.aquasec.com/trivy-checks:1"
           export TRIVY_QUIET=true
-
           mkdir -p SBOM_IMAGE
           ./billy generate \
             --access-token "${{ secrets.GITHUB_TOKEN }}" \
