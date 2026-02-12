@@ -75,7 +75,7 @@ jobs:
           set -euo pipefail
           mkdir -p sbom_image
           ./billy generate \
-            --access-token "${GITHUB_TOKEN}" \
+            --access-token "${TOKEN_GITHUB}" \
             --aqua-key "${AQUA_KEY}" \
             --aqua-secret "${AQUA_SECRET}" \
             --artifact-path "webflux-repro:test" \
