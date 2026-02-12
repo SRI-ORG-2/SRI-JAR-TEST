@@ -1,13 +1,44 @@
-name: Repro - Billy JAR vs Image
+name: Build & Test
 
 on:
-  push:
-  pull_request:
+  - pull_request
+  - push
 
 jobs:
-  build-and-scan:
-    name: Build JAR, Image and run Billy scans
+  scan:
+    name: Code Scans (Aqua / Trivy fs)
     runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Run Aqua scanner (trivy fs)
+        env:
+          TRIVY_USERNAME: ${{ secrets.TRIVY_USERNAME }}
+          TRIVY_PASSWORD: ${{ secrets.TRIVY_PASSWORD }}
+          AQUA_KEY: ${{ secrets.AQUA_KEY }}
+          AQUA_SECRET: ${{ secrets.AQUA_SECRET }}
+          GITHUB_TOKEN: ${{ github.token }}
+          AQUA_URL: https://api.supply-chain.cloud.aquasec.com
+          CSPM_URL: https://api.cloudsploit.com
+          TRIVY_RUN_AS_PLUGIN: 'aqua'
+        run: |
+          set -euo pipefail
+          mkdir -p trivy_scan_repo
+          # Running the aqua-scanner container and asking trivy to scan the repo (filesystem)
+          docker run --rm -v "${{ github.workspace }}":/src -w /src aquasec/aqua-scanner \
+            trivy fs --format json \
+              --db-repository=registry.aquasec.com/trivy-db:2 \
+              --checks-bundle-repository=registry.aquasec.com/trivy-checks:1 \
+              --java-db-repository=registry.aquasec.com/trivy-java-db:1 \
+              --output /src/trivy_scan_repo/trivy-repo.json \
+              --scanners config,vuln,secret .
+          echo "Aqua (Trivy fs) saved to trivy_scan_repo/trivy-repo.json"
+
+  build-and-scan:
+    name: Build JAR, Image and run scans (Trivy + Billy)
+    runs-on: ubuntu-latest
+    needs: scan
     steps:
       - name: Checkout repo
         uses: actions/checkout@v3
@@ -35,61 +66,85 @@ jobs:
           set -euo pipefail
           docker build -t webflux-repro:test .
 
-      - name: Install Billy (simple installer)
-        run: |
-          set -euo pipefail
-          # download and install into current workspace
-          curl -sLo install.sh "https://download.codesec.aquasec.com/billy/install.sh"
-          chmod +x install.sh
-          BINDIR="." sh install.sh
-          ./billy --version
-
-      - name: Billy scan - JAR artifact
-        env:
-          TRIVY_USERNAME: ${{ secrets.TRIVY_USERNAME }}
-          TRIVY_PASSWORD: ${{ secrets.TRIVY_PASSWORD }}
-          AQUA_KEY: ${{ secrets.AQUA_KEY }}
-          AQUA_SECRET: ${{ secrets.AQUA_SECRET }}
-          GITHUB_TOKEN: ${{ github.token }}
+      - name: Trivy scan - JAR (filesystem)
         run: |
           set -euo pipefail
           mkdir -p sbom_jar
+          # Run trivy via the aqua-scanner container to scan the jar as an archive/filesystem
+          docker run --rm -v "${{ github.workspace }}":/src -w /src aquasec/aqua-scanner \
+            trivy fs --format json --output /src/sbom_jar/trivy-jar.json java-repro/target/*.jar || true
+          echo "Saved JAR trivy result to sbom_jar/trivy-jar.json"
+          echo "Sample (first 200 lines):"
+          sed -n '1,200p' sbom_jar/trivy-jar.json || true
+
+      - name: Trivy scan - Docker image
+        run: |
+          set -euo pipefail
+          mkdir -p sbom_image
+          docker run --rm -v "${{ github.workspace }}":/src -w /src aquasec/aqua-scanner \
+            trivy image --format json --output /src/sbom_image/trivy-image.json webflux-repro:test || true
+          echo "Saved image trivy result to sbom_image/trivy-image.json"
+          echo "Sample (first 200 lines):"
+          sed -n '1,200p' sbom_image/trivy-image.json || true
+
+      - name: Install Billy
+        run: |
+          set -euo pipefail
+          curl -sLo install.sh "https://download.codesec.aquasec.com/billy/install.sh"
+          chmod +x install.sh
+          BINDIR="." sh install.sh
+          ./billy --version || true
+
+      - name: Billy generate - JAR artifact
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          AQUA_KEY: ${{ secrets.AQUA_KEY }}
+          AQUA_SECRET: ${{ secrets.AQUA_SECRET }}
+          TRIVY_USERNAME: ${{ secrets.TRIVY_USERNAME }}
+          TRIVY_PASSWORD: ${{ secrets.TRIVY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          mkdir -p sbom_billy_jar
+          # Use the GITHUB_TOKEN exported into env as access token
           ./billy generate \
             --access-token "${GITHUB_TOKEN}" \
             --aqua-key "${AQUA_KEY}" \
             --aqua-secret "${AQUA_SECRET}" \
             --artifact-path "java-repro/target/*.jar" \
             --log-file billy-jar.log \
-            --sbom-path sbom_jar || true
-          echo "=== Billy JAR logfile ==="
-          sed -n '1,200p' billy-jar.log || true
+            --sbom-path sbom_billy_jar || true
+          echo "=== Billy JAR logfile (head) ==="
+          head -n 200 billy-jar.log || true
 
-      - name: Billy scan - Docker image artifact
+      - name: Billy generate - Docker image artifact
         env:
-          TRIVY_USERNAME: ${{ secrets.TRIVY_USERNAME }}
-          TRIVY_PASSWORD: ${{ secrets.TRIVY_PASSWORD }}
+          GITHUB_TOKEN: ${{ github.token }}
           AQUA_KEY: ${{ secrets.AQUA_KEY }}
           AQUA_SECRET: ${{ secrets.AQUA_SECRET }}
-          GITHUB_TOKEN: ${{ github.token }}
+          TRIVY_USERNAME: ${{ secrets.TRIVY_USERNAME }}
+          TRIVY_PASSWORD: ${{ secrets.TRIVY_PASSWORD }}
         run: |
           set -euo pipefail
-          mkdir -p sbom_image
+          mkdir -p sbom_billy_image
           ./billy generate \
-            --access-token "${TOKEN_GITHUB}" \
+            --access-token "${GITHUB_TOKEN}" \
             --aqua-key "${AQUA_KEY}" \
             --aqua-secret "${AQUA_SECRET}" \
             --artifact-path "webflux-repro:test" \
             --log-file billy-image.log \
-            --sbom-path sbom_image || true
-          echo "=== Billy IMAGE logfile ==="
-          sed -n '1,200p' billy-image.log || true
+            --sbom-path sbom_billy_image || true
+          echo "=== Billy IMAGE logfile (head) ==="
+          head -n 200 billy-image.log || true
 
-      - name: Upload SBOMs and logs
+      - name: Upload all SBOMs and logs
         uses: actions/upload-artifact@v4
         with:
-          name: billy-repro-output
+          name: repro-sboms-and-logs
           path: |
+            trivy_scan_repo/trivy-repo.json
             sbom_jar
             sbom_image
+            sbom_billy_jar
+            sbom_billy_image
             billy-jar.log
             billy-image.log
