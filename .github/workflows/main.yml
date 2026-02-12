@@ -1,0 +1,146 @@
+name: Build & Test
+
+on: [pull_request, push]
+
+jobs:
+  scan:
+    name: Code Scans
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Run Aqua scanner
+        uses: docker://aquasec/aqua-scanner
+        with:
+          args: trivy fs --scanners config,vuln,secret .
+        env:
+          TRIVY_USERNAME: ${{ secrets.TRIVY_USERNAME }}
+          TRIVY_PASSWORD: ${{ secrets.TRIVY_PASSWORD }}
+          AQUA_KEY: ${{ secrets.AQUA_KEY }}
+          AQUA_SECRET: ${{ secrets.AQUA_SECRET }}
+          GITHUB_TOKEN: ${{ github.token }}
+          AQUA_URL: https://api.supply-chain.cloud.aquasec.com
+          CSPM_URL: https://api.cloudsploit.com
+          TRIVY_RUN_AS_PLUGIN: 'aqua'
+
+  test:
+    name: Build and Test
+    runs-on: ubuntu-20.04
+    needs: scan
+    steps:
+      - uses: actions/checkout@v3
+
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.6'
+          cache: 'pip'
+      - run: pip install -r requirements.txt
+
+      - name: Run DVGA
+        run: |
+          nohup python3 ./app.py &
+      - name: Wait for server
+        run: sleep 1
+      - name: Run DVGA Tests
+        run: python3 -m pytest tests/*
+
+  sbom:
+    name: Repro Customer Issue (Billy: JAR vs Image)
+    runs-on: ubuntu-22.04
+    needs: test
+    steps:
+      - uses: actions/checkout@v3
+
+      # ---- Build the Java fat JAR (WebFlux repro) ----
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+          cache: 'maven'
+
+      - name: Build WebFlux fat JAR
+        working-directory: java-repro
+        run: |
+          mvn -q -DskipTests package
+          echo "JAR built:"
+          ls -lah target/*.jar
+          echo "Check BOOT-INF/lib exists:"
+          jar tf target/*.jar | grep -E "^BOOT-INF/lib/" | head -n 5
+
+      # ---- Build Docker image that contains the same JAR ----
+      - name: Build Docker Image
+        working-directory: java-repro
+        run: |
+          docker build -t knightfortheright/webflux-repro:v1 .
+
+      # ---- Install Billy (pin to 1.390) ----
+      - name: Install Billy
+        run: |
+          export BILLY_SERVER=https://billy.codesec.aquasec.com
+          export BILLY_VERSION=1.390
+
+          curl -sLo install.sh download.codesec.aquasec.com/billy/install.sh
+          curl -sLo install.sh.checksum https://github.com/argonsecurity/releases/releases/latest/download/install.sh.checksum
+
+          # Correct checksum verification
+          sha256sum -c install.sh.checksum
+
+          BINDIR="." sh install.sh
+          ./billy --version
+
+      # ---- Billy scan: JAR artifact ----
+      - name: Billy Generate SBOM for JAR
+        run: |
+          export BILLY_SERVER=https://billy.codesec.aquasec.com
+          export TRIVY_USERNAME=${{ secrets.TRIVY_USERNAME }}
+          export TRIVY_PASSWORD=${{ secrets.TRIVY_PASSWORD }}
+          export TRIVY_DB_REPOSITORY="registry.aquasec.com/trivy-db:2"
+          export TRIVY_JAVA_DB_REPOSITORY="registry.aquasec.com/trivy-java-db:1"
+          export TRIVY_CHECKS_BUNDLE_REPOSITORY="registry.aquasec.com/trivy-checks:1"
+          export TRIVY_QUIET=true
+
+          mkdir -p SBOM_JAR
+          ./billy generate \
+            --access-token "${{ secrets.GITHUB_TOKEN }}" \
+            --aqua-key "${{ secrets.AQUA_KEY }}" \
+            --aqua-secret "${{ secrets.AQUA_SECRET }}" \
+            --cspm-url https://api.cloudsploit.com \
+            --artifact-path "java-repro/target/webflux-repro-0.0.1-SNAPSHOT.jar" \
+            --quiet \
+            --log-file billy-jar.log \
+            --sbom-path SBOM_JAR
+
+      # ---- Billy scan: Docker image artifact ----
+      - name: Billy Generate SBOM for Docker Image
+        run: |
+          export BILLY_SERVER=https://billy.codesec.aquasec.com
+          export TRIVY_USERNAME=${{ secrets.TRIVY_USERNAME }}
+          export TRIVY_PASSWORD=${{ secrets.TRIVY_PASSWORD }}
+          export TRIVY_DB_REPOSITORY="registry.aquasec.com/trivy-db:2"
+          export TRIVY_JAVA_DB_REPOSITORY="registry.aquasec.com/trivy-java-db:1"
+          export TRIVY_CHECKS_BUNDLE_REPOSITORY="registry.aquasec.com/trivy-checks:1"
+          export TRIVY_QUIET=true
+
+          mkdir -p SBOM_IMAGE
+          ./billy generate \
+            --access-token "${{ secrets.GITHUB_TOKEN }}" \
+            --aqua-key "${{ secrets.AQUA_KEY }}" \
+            --aqua-secret "${{ secrets.AQUA_SECRET }}" \
+            --cspm-url https://api.cloudsploit.com \
+            --artifact-path "knightfortheright/webflux-repro:v1" \
+            --quiet \
+            --log-file billy-image.log \
+            --sbom-path SBOM_IMAGE
+
+      # ---- Optional: upload results for easy comparison ----
+      - name: Upload SBOMs and logs
+        uses: actions/upload-artifact@v4
+        with:
+          name: billy-jar-vs-image-output
+          path: |
+            SBOM_JAR
+            SBOM_IMAGE
+            billy-jar.log
+            billy-image.log
